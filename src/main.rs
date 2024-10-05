@@ -1,106 +1,102 @@
 mod util;
 
-use crate::util::constants::{API_VERSION, APPLICATION_NAME, APPLICATION_VERSION, ENGINE_NAME, ENGINE_VERSION, WINDOW_HEIGHT, WINDOW_WIDTH};
+use crate::util::constants::{APPLICATION_NAME, WINDOW_HEIGHT, WINDOW_WIDTH};
 use ash::vk;
-use std::ffi::CString;
-use std::ptr;
-use std::ptr::null;
-use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Fullscreen, Window};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use winit::event::{Event, KeyEvent, WindowEvent};
+use winit::keyboard::{Key, NamedKey};
 
 struct NeoClausewitz {
     _entry: ash::Entry,
     instance: ash::Instance,
+    surface: ash::khr::surface::Instance,
 }
 
 impl NeoClausewitz {
-    pub fn new() -> NeoClausewitz {
+    pub unsafe fn new(event_loop: &winit::event_loop::EventLoop<()>) -> NeoClausewitz {
         let entry = ash::Entry::linked();
-        let instance = NeoClausewitz::create_instance(&entry);
+        let instance = NeoClausewitz::create_instance(&entry, event_loop);
+        let surface = ash::khr::surface::Instance::new(&entry, &instance);
 
         NeoClausewitz {
             _entry: entry,
             instance,
+            surface,
         }
     }
 
-    fn init_window(event_loop: &EventLoop<()>) -> Window {
+    fn init_window(event_loop: &winit::event_loop::EventLoop<()>) -> winit::window::Window {
         winit::window::WindowBuilder::new()
             .with_title(APPLICATION_NAME)
             .with_min_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-            .with_fullscreen(Some(Fullscreen::Borderless(event_loop.primary_monitor())))
             .build(event_loop)
             .expect("Failed to create window.")
     }
 
-    fn create_instance(entry: &ash::Entry) -> ash::Instance {
-        let app_name = CString::new(APPLICATION_NAME).unwrap();
-        let engine_name = CString::new(ENGINE_NAME).unwrap();
-        let app_info = vk::ApplicationInfo {
-            s_type: vk::StructureType::APPLICATION_INFO,
-            p_next: ptr::null(),
-            p_application_name: app_name.as_ptr(),
-            application_version: APPLICATION_VERSION,
-            p_engine_name: engine_name.as_ptr(),
-            engine_version: ENGINE_VERSION,
-            api_version: API_VERSION,
-            _marker: Default::default(),
-        };
-
-        let create_info = vk::InstanceCreateInfo {
-            s_type: vk::StructureType::INSTANCE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::InstanceCreateFlags::empty(),
-            p_application_info: &app_info,
-            pp_enabled_layer_names: ptr::null(),
-            enabled_extension_count: 0,
-            pp_enabled_extension_names: null(),
-            enabled_layer_count: 0,
-            _marker: Default::default(),
-        };
-
-        let instance: ash::Instance = unsafe {
-            entry
-                .create_instance(&create_info, None)
-                .expect("Failed to create instance!")
-        };
-
-        instance
+    unsafe fn create_instance(entry: &ash::Entry, event_loop: &winit::event_loop::EventLoop<()>) -> ash::Instance {
+        let surface_extensions = ash_window::enumerate_required_extensions(event_loop.display_handle().unwrap().as_raw()).unwrap();
+        let app_desc = vk::ApplicationInfo::default().api_version(vk::make_api_version(0, 1, 0, 0));
+        let instance_desc = vk::InstanceCreateInfo::default()
+            .application_info(&app_desc)
+            .enabled_extension_names(surface_extensions);
+        entry.create_instance(&instance_desc, None).expect("Failed to create instance.")
     }
 
-    fn draw_frame(&mut self) {
-        // Drawing will be here
-    }
-
-    pub fn main_loop(mut self, event_loop: EventLoop<()>, window: Window) {
-        event_loop.run(move |event, _, control_flow| {
-            match event {
-                | Event::WindowEvent { event, .. } => {
-                    match event {
-                        | WindowEvent::CloseRequested => {
-                            *control_flow = ControlFlow::Exit
-                        }
-                        | WindowEvent::KeyboardInput { input, .. } => {}
-                        | _ => {}
-                    }
-                }
-                | Event::MainEventsCleared => {
-                    window.request_redraw();
-                }
-                | Event::RedrawRequested(_window_id) => {
-                    self.draw_frame();
-                }
-                _ => (),
+    pub fn main_loop(mut self, event_loop: winit::event_loop::EventLoop<()>, window: winit::window::Window) {
+        let mut surface = None;
+        event_loop.run(move |event, elwp| match event {
+            winit::event::Event::WindowEvent {
+                event:
+                WindowEvent::CloseRequested
+                | WindowEvent::KeyboardInput {
+                    event:
+                    KeyEvent {
+                        logical_key: Key::Named(NamedKey::Escape),
+                        ..
+                    },
+                    ..
+                },
+                window_id: _,
+            } => {
+                elwp.exit();
             }
-        })
+            Event::LoopExiting => unsafe {
+                if let Some(surface) = surface.take() {
+                    self.surface.destroy_surface(surface, None);
+                }
+            }
+            Event::Resumed => unsafe {
+                // Create a surface from winit window.
+                let s = ash_window::create_surface(
+                    &self._entry,
+                    &self.instance,
+                    window.display_handle().unwrap().as_raw(),
+                    window.window_handle().unwrap().as_raw(),
+                    None,
+                )
+                    .unwrap();
+                println!("surface: {s:?}");
+                assert!(
+                    surface.replace(s).is_none(),
+                    "Surface must not yet exist when Resumed is called"
+                );
+            }
+            Event::Suspended => unsafe {
+                let surface = surface
+                    .take()
+                    .expect("Surface must have been created in Resumed");
+                self.surface.destroy_surface(surface, None);
+            }
+            _ => {}
+        }).expect("Failed to run event loop.");
     }
 }
 
 fn main() {
-    let event_loop = EventLoop::new();
+    let event_loop = winit::event_loop::EventLoop::new().expect("Failed to create event loop.");
     let window = NeoClausewitz::init_window(&event_loop);
-
-    let vulkan_app = NeoClausewitz::new();
-    vulkan_app.main_loop(event_loop, window);
+    unsafe {
+        let neo_clausewitz = NeoClausewitz::new(&event_loop);
+        neo_clausewitz.main_loop(event_loop, window);
+    }
 }
